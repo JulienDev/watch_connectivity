@@ -97,7 +97,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
             .addOnSuccessListener { result.success(it.isNotEmpty()) }
             .addOnFailureListener { result.error(it.message ?: "", it.localizedMessage, it) }
     }
-
+    
     @SuppressLint("VisibleForTests")
     private fun applicationContext(result: Result) {
         dataClient.dataItems
@@ -107,12 +107,19 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
                     it.uri.host == localNode.id && it.uri.path == "/$channelName"
                 }
                 if (localNodeItem != null) {
-                    val itemContent = objectFromBytes(localNodeItem.data!!)
-                    result.success(itemContent)
+                    try {
+                        val itemContent = objectFromBytes(localNodeItem.data!!)
+                        result.success(itemContent)
+                    } catch (e: Exception) {
+                        result.error(e.javaClass.simpleName, e.message ?: "Erreur lors de la désérialisation", e)
+                    }
                 } else {
                     result.success(emptyMap<String, Any>())
                 }
-            }.addOnFailureListener { result.error(it.message ?: "", it.localizedMessage, it) }
+            }
+            .addOnFailureListener { exception ->
+                result.error(exception.javaClass.simpleName, exception.message ?: "Erreur lors de la récupération des dataItems", exception)
+            }
     }
 
     @SuppressLint("VisibleForTests")
