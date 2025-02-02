@@ -154,8 +154,12 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
     }
 
     override fun onMessageReceived(message: MessageEvent) {
-        val messageContent = objectFromBytes(message.data)
-        channel.invokeMethod("didReceiveMessage", messageContent)
+        try {
+            val messageContent = objectFromBytes(message.data)
+            channel.invokeMethod("didReceiveMessage", messageContent)
+        } catch (e: Exception) {
+            print("Erreur lors de la désérialisation")
+        }
     }
 
     @SuppressLint("VisibleForTests")
