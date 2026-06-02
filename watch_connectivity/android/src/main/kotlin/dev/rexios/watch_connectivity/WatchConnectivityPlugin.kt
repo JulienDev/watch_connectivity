@@ -23,6 +23,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
     companion object {
         private const val channelName = "watch_connectivity"
         private const val tag = "WatchConnectivity"
+        private const val wearableUnavailableCode = "wearable_runtime_unavailable"
         private val companionPackages = setOf(
             "com.google.android.wearable.app",
             "com.samsung.android.app.watchmanager",
@@ -40,6 +41,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
     private var messageClient: MessageClient? = null
     private var dataClient: DataClient? = null
     private var localNodeId: String? = null
+    private var listenersRegistered = false
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, channelName)
@@ -57,7 +59,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
             // Getters
-            "isSupported" -> result.success(hasCompanionAppInstalled() && ensureWearableClients())
+            "isSupported" -> result.success(true)
             "isPaired" -> isPaired(result)
             "isReachable" -> isReachable(result)
             "applicationContext" -> applicationContext(result)
@@ -97,6 +99,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
 
     private fun ensureWearableClients(): Boolean {
         if (nodeClient != null && messageClient != null && dataClient != null) {
+            registerListenersIfNeeded()
             return true
         }
 
@@ -108,6 +111,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
             nodeClient = Wearable.getNodeClient(applicationContext)
             messageClient = Wearable.getMessageClient(applicationContext)
             dataClient = Wearable.getDataClient(applicationContext)
+            registerListenersIfNeeded()
             true
         }.getOrElse {
             Log.w(tag, "Wearable client init failed", it)
@@ -116,14 +120,31 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
         }
     }
 
+    private fun registerListenersIfNeeded() {
+        if (listenersRegistered) {
+            return
+        }
+
+        val localMessageClient = messageClient ?: return
+        val localDataClient = dataClient ?: return
+        localMessageClient.addListener(this)
+        localDataClient.addListener(this)
+        listenersRegistered = true
+    }
+
     private fun clearWearableClients() {
+        if (listenersRegistered) {
+            messageClient?.removeListener(this)
+            dataClient?.removeListener(this)
+            listenersRegistered = false
+        }
         nodeClient = null
         messageClient = null
         dataClient = null
         localNodeId = null
     }
 
-    private fun withLocalNodeId(onReady: (String?) -> Unit) {
+    private fun withRequiredLocalNodeId(result: Result, onReady: (String) -> Unit) {
         localNodeId?.let {
             onReady(it)
             return
@@ -131,7 +152,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
 
         val client = nodeClient
         if (client == null) {
-            onReady(null)
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
@@ -142,7 +163,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
             }
             .addOnFailureListener {
                 Log.w(tag, "Failed to resolve local Wear OS node", it)
-                onReady(null)
+                result.error(it.javaClass.simpleName, it.message ?: "Failed to resolve local Wear OS node", it)
             }
     }
 
@@ -151,44 +172,46 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
     }
 
     private fun isReachable(result: Result) {
-        if (!ensureWearableClients()) {
+        if (!hasCompanionAppInstalled()) {
             result.success(false)
+            return
+        }
+
+        if (!ensureWearableClients()) {
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
         val client = nodeClient
         if (client == null) {
-            result.success(false)
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
         client.connectedNodes
             .addOnSuccessListener { result.success(it.isNotEmpty()) }
-            .addOnFailureListener {
-                Log.w(tag, "Failed to query connected Wear OS nodes", it)
-                result.success(false)
-            }
+            .addOnFailureListener { result.error(it.javaClass.simpleName, it.localizedMessage, it) }
     }
     
     @SuppressLint("VisibleForTests")
     private fun applicationContext(result: Result) {
-        if (!ensureWearableClients()) {
+        if (!hasCompanionAppInstalled()) {
             result.success(emptyMap<String, Any>())
+            return
+        }
+
+        if (!ensureWearableClients()) {
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
         val client = dataClient
         if (client == null) {
-            result.success(emptyMap<String, Any>())
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
-        withLocalNodeId { localId ->
-            if (localId == null) {
-                result.success(emptyMap<String, Any>())
-                return@withLocalNodeId
-            }
-
+        withRequiredLocalNodeId(result) { localId ->
             client.dataItems
                 .addOnSuccessListener { items ->
                     val localNodeItem = items.firstOrNull {
@@ -213,23 +236,23 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
 
     @SuppressLint("VisibleForTests")
     private fun receivedApplicationContexts(result: Result) {
-        if (!ensureWearableClients()) {
+        if (!hasCompanionAppInstalled()) {
             result.success(emptyList<Any>())
+            return
+        }
+
+        if (!ensureWearableClients()) {
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
         val client = dataClient
         if (client == null) {
-            result.success(emptyList<Any>())
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
-        withLocalNodeId { localId ->
-            if (localId == null) {
-                result.success(emptyList<Any>())
-                return@withLocalNodeId
-            }
-
+        withRequiredLocalNodeId(result) { localId ->
             client.dataItems
                 .addOnSuccessListener { items ->
                     val itemContents = items.filter {
@@ -238,22 +261,26 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
                     result.success(itemContents)
                 }
                 .addOnFailureListener {
-                    result.error(it.message ?: "", it.localizedMessage, it)
+                    result.error(it.javaClass.simpleName, it.localizedMessage, it)
                 }
         }
     }
 
     private fun sendMessage(call: MethodCall, result: Result) {
+        if (!hasCompanionAppInstalled()) {
+            result.error("wearable_not_paired", "No Wear OS companion app installed", null)
+            return
+        }
+
         if (!ensureWearableClients()) {
-            Log.w(tag, "Ignoring Wear OS message because wearable runtime is unavailable")
-            result.success(null)
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
         val localNodeClient = nodeClient
         val localMessageClient = messageClient
         if (localNodeClient == null || localMessageClient == null) {
-            result.success(null)
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
@@ -261,23 +288,24 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
         localNodeClient.connectedNodes.addOnSuccessListener { nodes ->
             nodes.forEach { localMessageClient.sendMessage(it.id, channelName, messageData) }
             result.success(null)
-        }.addOnFailureListener {
-            Log.w(tag, "Failed to send Wear OS message", it)
-            result.success(null)
-        }
+        }.addOnFailureListener { result.error(it.javaClass.simpleName, it.localizedMessage, it) }
     }
 
     @SuppressLint("VisibleForTests")
     private fun updateApplicationContext(call: MethodCall, result: Result) {
+        if (!hasCompanionAppInstalled()) {
+            result.error("wearable_not_paired", "No Wear OS companion app installed", null)
+            return
+        }
+
         if (!ensureWearableClients()) {
-            Log.w(tag, "Ignoring Wear OS application context update because wearable runtime is unavailable")
-            result.success(null)
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
         val client = dataClient
         if (client == null) {
-            result.success(null)
+            result.error(wearableUnavailableCode, "Wear OS runtime unavailable", null)
             return
         }
 
@@ -286,10 +314,7 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
         dataItem.data = eventData
         client.putDataItem(dataItem)
             .addOnSuccessListener { result.success(null) }
-            .addOnFailureListener {
-                Log.w(tag, "Failed to update Wear OS application context", it)
-                result.success(null)
-            }
+            .addOnFailureListener { result.error(it.javaClass.simpleName, it.localizedMessage, it) }
 
     }
 
@@ -297,8 +322,8 @@ class WatchConnectivityPlugin : FlutterPlugin, MethodCallHandler,
         try {
             val messageContent = objectFromBytes(message.data)
             channel.invokeMethod("didReceiveMessage", messageContent)
-        } catch (e: Exception) {
-            print("Erreur lors de la désérialisation")
+        } catch (_: Exception) {
+            Log.w(tag, "Failed to deserialize Wear OS message")
         }
     }
 
